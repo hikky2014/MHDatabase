@@ -13,7 +13,7 @@ import UIKit
  *
  *
  */
-public final class DBConnection: NSObject {
+public final class DBConnection {
 
     //定义数据库的存储方式
     public enum Location : CustomStringConvertible {
@@ -63,14 +63,14 @@ public final class DBConnection: NSObject {
     fileprivate var handle : OpaquePointer? = nil
     fileprivate var queue = DispatchQueue(label:"sqlite");
     fileprivate static let queueKey = DispatchSpecificKey<Int>()
-    fileprivate var queueContext : Int = unsafeBitCast(self, to: Int.self);
+    fileprivate lazy var queueContext : Int = unsafeBitCast(self, to: Int.self);
     init(_ location:Location = .inMemory, readonly:Bool=false) throws{
         //打开数据库
-        // SQLITE_OPEN_FULLMUTEX 数据库连接串行模式
         let flags = readonly ? SQLITE_OPEN_READONLY : SQLITE_OPEN_CREATE | SQLITE_OPEN_READWRITE;
-        sqlite3_open_v2(location.description, &handle, flags | SQLITE_OPEN_FULLMUTEX, nil);
         
-        //给数据库设置标记（队列) 避免操作数据库是并发
+        try check(sqlite3_open_v2(location.description, &handle, flags | SQLITE_OPEN_FULLMUTEX, nil));
+        
+        //给数据库设置标记（队列) 避免操作数据库并发
         queue.setSpecific(key: DBConnection.queueKey, value: queueContext)
     }
     
@@ -78,4 +78,83 @@ public final class DBConnection: NSObject {
         try self.init(.uri(fileName), readonly:readonly);
     }
     
+    //处理数据库异常信息
+    @discardableResult
+    func check(_ resultCode: Int32) throws -> Int32 {
+        guard let error = DBResult(errorCode:resultCode, connection:self)  else {
+            return resultCode
+        }
+        
+        throw error
+        
+    }
+    
+    //监测数据库操作
+    public var readonly : Bool {
+        return sqlite3_db_readonly(handle, nil) == 1
+    }
+    
+    
+    
+    public var changes : Int {
+        return Int(sqlite3_changes(handle))
+    }
+    
+    public var totalChanges : Int {
+        return Int(sqlite3_total_changes(handle))
+    }
+    
+    //执行SQL语句
+    public func execute(_ sql:String) throws {
+        _ = try dbSync{
+            try self.check(sqlite3_exec(self.handle, sql, nil, nil, nil))
+        }
+    }
+    
+    //保证同步->传递闭包
+    public func dbSync<T>( _ callback:@escaping () throws -> T) rethrows -> T{
+        var success:T?
+        var failure:Error?
+        
+        //临时代码块 处理异常结果
+        let box : () -> Void = {
+            do {
+                success = try callback()
+            } catch  {
+                failure = error
+            }
+        }
+        
+        
+        if DispatchQueue.getSpecific(key:DBConnection.queueKey) == queueContext {
+            box()     //当前队列
+        }else {
+            queue.sync(execute: box) //其他子队列
+        }
+        
+    
+        if let fail = failure {
+            try { () -> Void in
+                throw fail
+            }()
+        }
+        
+        return success!
+    }
+    
+}
+
+//异常信息（数据库返回结果）
+public enum DBResult : Error {
+    fileprivate static let successCodes = [SQLITE_OK, SQLITE_ROW, SQLITE_DONE];
+    case error(message:String, code:Int32)
+    
+    init?(errorCode: Int32, connection:DBConnection) {
+        guard !DBResult.successCodes.contains(errorCode) else {
+            return nil
+        }
+        
+        let message = String(cString: sqlite3_errmsg(connection.handle))
+        self = .error(message: message, code: errorCode)
+    }
 }
