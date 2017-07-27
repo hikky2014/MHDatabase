@@ -25,9 +25,10 @@ class ViewController: UIViewController {
         } catch  {
             print("出现异常：\(error)")
         }
+     
         
     }
-
+    
     override func didReceiveMemoryWarning() {
         super.didReceiveMemoryWarning()
         // Dispose of any resources that can be recreated.
